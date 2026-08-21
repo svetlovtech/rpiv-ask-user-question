@@ -22,6 +22,8 @@
 export const ASK_USER_PROMPT_EVENT = "rpiv:ask-user:prompt" as const;
 
 export interface AskUserPromptEventPayload {
+	/** The tool call id of the pending ask_user_question call (used to correlate a Telegram answer back to the TUI dialog). */
+	toolCallId?: string;
 	questions: ReadonlyArray<AskUserPromptQuestion>;
 }
 
