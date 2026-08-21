@@ -1,0 +1,7 @@
+{
+  "package": "@juicesharp/rpiv-ask-user-question",
+  "upstreamRepo": "https://github.com/juicesharp/rpiv-mono",
+  "upstreamPath": "packages/rpiv-ask-user-question",
+  "baselineVersion": "2.6.0",
+  "baselineCommit": "fdda6a1"
+}
