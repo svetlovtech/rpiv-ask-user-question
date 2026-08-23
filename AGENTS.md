@@ -7,6 +7,7 @@ Structured questionnaire tool for the Pi coding agent (typed options instead of 
 - npm package: `@juicesharp/rpiv-ask-user-question`
 - repo: https://github.com/juicesharp/rpiv-mono (monorepo, this package lives in `packages/rpiv-ask-user-question`)
 - Pi loads THIS fork (not the npm package): `~/.pi/agent/settings.json` → `/home/dev/pi-forks/rpiv-ask-user-question`
+- GitHub mirror (origin): https://github.com/svetlovtech/rpiv-ask-user-question (private, standalone repo). Push: `git push origin master`.
 
 ## Baseline
 
