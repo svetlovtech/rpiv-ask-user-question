@@ -47,9 +47,19 @@ function emitAskUserPromptEvent(
 	pi.events.emit(ASK_USER_PROMPT_EVENT, payload);
 }
 
-function emitAskUserBlockedEvent(pi: ExtensionAPI, active: boolean): void {
-	const payload: AskUserBlockedEventPayload = { active };
+function emitAskUserBlockedEvent(pi: ExtensionAPI, active: boolean, summary?: string): void {
+	const payload: AskUserBlockedEventPayload = summary === undefined ? { active } : { active, summary };
 	pi.events.emit(ASK_USER_BLOCKED_EVENT, payload);
+}
+
+/** Compact one-line rendering of a questionnaire outcome for external mirrors. */
+function summarizeOutcome(result: QuestionnaireResult): string {
+	if (result.cancelled) return "отменено пользователем";
+	const parts = result.answers.map((a) => {
+		const text = a.kind === "multi" && a.selected?.length ? a.selected.join(", ") : (a.answer ?? "—");
+		return `${a.questionIndex + 1}) ${text}`;
+	});
+	return parts.length > 0 ? parts.join("; ") : "без ответа";
 }
 
 /** Canonical tool name — single source of truth shared with the reconcile module. */
@@ -251,11 +261,13 @@ Preview content is rendered as markdown in a monospace box. Multi-line text with
 			// custom()-resolved-undefined backstop below. See ./rpc-fallback.ts.
 			if (ctxMode === "rpc" && hasDialogUI_(ctx.ui)) {
 				emitAskUserBlockedEvent(pi, true);
+				let rpcOutcome: QuestionnaireResult | undefined;
 				try {
 					emitTerminalAttention();
-					return buildQuestionnaireResponse(await runRpcQuestionnaire(ctx.ui, typed), typed);
+					rpcOutcome = await runRpcQuestionnaire(ctx.ui, typed);
+					return buildQuestionnaireResponse(rpcOutcome, typed);
 				} finally {
-					emitAskUserBlockedEvent(pi, false);
+					emitAskUserBlockedEvent(pi, false, rpcOutcome && summarizeOutcome(rpcOutcome));
 				}
 			}
 
@@ -294,6 +306,7 @@ Preview content is rendered as markdown in a monospace box. Multi-line text with
 				});
 			}
 
+			let outcome: QuestionnaireResult | undefined;
 			emitAskUserBlockedEvent(pi, true);
 			try {
 				emitTerminalAttention();
@@ -351,17 +364,19 @@ Preview content is rendered as markdown in a monospace box. Multi-line text with
 				);
 
 				if (result === undefined) {
+					outcome = { answers: [], cancelled: true };
 					if (hasDialogUI_(ctx.ui)) {
 						return buildQuestionnaireResponse(await runRpcQuestionnaire(ctx.ui, typed), typed);
 					}
 					return buildToolResult(ERROR_NO_CUSTOM_UI, { answers: [], cancelled: true, error: "no_custom_ui" });
 				}
 
+				outcome = result;
 				return buildQuestionnaireResponse(result, typed);
 			} finally {
 				removeOverlayInputListener?.();
 				externalResolveRef.current = null;
-				emitAskUserBlockedEvent(pi, false);
+				emitAskUserBlockedEvent(pi, false, outcome && summarizeOutcome(outcome));
 			}
 	}
 
