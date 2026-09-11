@@ -30,6 +30,12 @@ Structured questionnaire tool for the Pi coding agent (typed options instead of 
 
 ## Syncing upstream updates
 
+> **Runtime deps are REQUIRED for Pi to load the extension.** 2.9.0 added
+> `@juicesharp/rpiv-config` and `@juicesharp/rpiv-i18n` as runtime deps —
+> keep them in `node_modules/` (installed copy may be refreshed via
+> `npm pack @juicesharp/rpiv-config@<ver>` + unpack into `node_modules/@juicesharp/`;
+> `@earendil-works/*` and `typebox` are provided by Pi / already vendored).
+
 ```bash
 git fetch upstream
 UP=$(git rev-parse upstream/main)
