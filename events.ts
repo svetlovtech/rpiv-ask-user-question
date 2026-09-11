@@ -35,6 +35,19 @@ export const ASK_USER_BLOCKED_EVENT = "rpiv:ask-user:blocked" as const;
 export interface AskUserBlockedEventPayload {
 	/** True while input is awaited; false when the wait ends (answer, cancel, or error). */
 	active: boolean;
+	/**
+	 * Short human-readable summary of how the wait ended, present only when
+	 * `active: false`. Examples: "1) Всё работает", "отменено пользователем".
+	 * Additive, optional — consumers must treat it as best-effort text.
+	 */
+	summary?: string;
+	/**
+	 * Per-question answer texts indexed by question order ("—" when a question
+	 * was left unanswered), present only when `active: false` and the outcome
+	 * is known. Additive, optional — lets consumers append each question's own
+	 * answer to its own message instead of the joined summary.
+	 */
+	perQuestion?: string[];
 }
 
 export interface AskUserPromptQuestion {

@@ -24,6 +24,7 @@ import {
 	MAX_OPTIONS,
 	MAX_QUESTIONS,
 	MIN_OPTIONS,
+	type QuestionAnswer,
 	type QuestionData,
 	type QuestionnaireError,
 	type QuestionnaireResult,
@@ -33,8 +34,9 @@ import {
 import { validateQuestionnaire } from "./tool/validate-questionnaire.js";
 import type { WrappingSelectItem } from "./view/components/wrapping-select.js";
 
-function emitAskUserPromptEvent(pi: ExtensionAPI, params: QuestionParams): void {
+function emitAskUserPromptEvent(pi: ExtensionAPI, params: QuestionParams, toolCallId: string): void {
 	const payload: AskUserPromptEventPayload = {
+		toolCallId,
 		questions: params.questions.map((q) => ({
 			question: q.question,
 			header: q.header,
@@ -49,29 +51,44 @@ function emitAskUserPromptEvent(pi: ExtensionAPI, params: QuestionParams): void 
 	pi.events.emit(ASK_USER_PROMPT_EVENT, payload);
 }
 
-function emitAskUserBlockedEvent(pi: ExtensionAPI, active: boolean): void {
-	const payload: AskUserBlockedEventPayload = { active };
+function emitAskUserBlockedEvent(pi: ExtensionAPI, active: boolean, summary?: string, perQuestion?: string[]): void {
+	const payload: AskUserBlockedEventPayload =
+		summary === undefined
+			? { active }
+			: perQuestion === undefined
+				? { active, summary }
+				: { active, summary, perQuestion };
 	pi.events.emit(ASK_USER_BLOCKED_EVENT, payload);
 }
+
+/** Compact one-line rendering of a questionnaire outcome for external mirrors. */
+function summarizeOutcome(result: QuestionnaireResult): string {
+	if (result.cancelled) return "отменено пользователем";
+	const parts = result.answers.map((a) => {
+		const text = a.kind === "multi" && a.selected?.length ? a.selected.join(", ") : (a.answer ?? "—");
+		return `${a.questionIndex + 1}) ${text}`;
+	});
+	return parts.length > 0 ? parts.join("; ") : "без ответа";
+}
+
+/** Per-question answer texts ("—" when a question has no answer). */
+function summarizePerQuestion(result: QuestionnaireResult, total: number): string[] {
+	if (result.cancelled) return [];
+	const out = new Array<string>(total).fill("—");
+	for (const a of result.answers) {
+		const text = a.kind === "multi" && a.selected?.length ? a.selected.join(", ") : (a.answer ?? "—");
+		if (a.questionIndex >= 0 && a.questionIndex < total) out[a.questionIndex] = text;
+	}
+	return out;
+}
+
+/** Canonical tool name — single source of truth shared with the reconcile module. */
+export const ASK_USER_QUESTION_TOOL_NAME = "ask_user_question";
 
 /** Non-interactive host backstop (the reconciler normally strips the tool first). */
 function rejectWithoutUi() {
 	return buildToolResult(ERROR_NO_UI, { answers: [], cancelled: true, error: "no_ui" });
 }
-
-/** Sequential native-dialog walker for RPC hosts; brackets it with the blocked-event pair + terminal bell. */
-async function runRpcPath(pi: ExtensionAPI, ui: DialogUI, typed: QuestionParams) {
-	emitAskUserBlockedEvent(pi, true);
-	try {
-		emitTerminalAttention();
-		return buildQuestionnaireResponse(await runRpcQuestionnaire(ui, typed), typed);
-	} finally {
-		emitAskUserBlockedEvent(pi, false);
-	}
-}
-
-/** Canonical tool name — single source of truth shared with the reconcile module. */
-export const ASK_USER_QUESTION_TOOL_NAME = "ask_user_question";
 
 const ERROR_NO_UI = "Error: UI not available (running in non-interactive mode)";
 
@@ -86,6 +103,22 @@ const ERROR_STALE_MODULE_CACHE =
 
 /** Standard terminal bell — same byte rpiv-warp exports as OSC_TERMINATOR. */
 export const BEL = "\x07";
+
+/**
+ * Shared event channel used by the optional Telegram bridge extension
+ * (`pi-telegram-bridge`) to complete an in-flight ask_user_question dialog
+ * programmatically after the user answers in Telegram.
+ *
+ * Payload: `{ toolCallId: string, answers: QuestionAnswer[] }`.
+ * The dialog resolves with those answers (cancelled: false). A missing
+ * listener is a no-op — the dialog stays open and answers on the terminal.
+ */
+export const ASK_EXTERNAL_RESOLVE_EVENT = "pi-telegram-bridge:resolve-ask" as const;
+
+export interface ExternalResolvePayload {
+	toolCallId: string;
+	answers: QuestionAnswer[];
+}
 
 /**
  * Emit one portable terminal attention signal without touching redirected output.
@@ -112,7 +145,7 @@ type OverlayHandleRef = { current: OverlayHandle | undefined };
 
 type SessionLoad =
 	| { ok: true; module: SessionModule }
-	| { ok: false; error: Extract<QuestionnaireError, "session_load_failed" | "stale_module_cache">; message: string };
+	| { ok: false, error: Extract<QuestionnaireError, "session_load_failed" | "stale_module_cache">; message: string };
 
 /**
  * Lazy-load the ~560ms QuestionnaireSession view/TUI render graph, guarding
@@ -183,6 +216,11 @@ function registerCollapseKeyListener(
  * Build the `ctx.ui.custom` component factory: constructs the session (capturing it in
  * `sessionRef`) and exposes its component. `editInput` keeps its two dynamic imports —
  * they must stay lazy per-invocation.
+ *
+ * Telegram-bridge hook: before the session is constructed, `externalResolveRef` is
+ * pointed at the factory's `done` so `ASK_EXTERNAL_RESOLVE_EVENT` can complete the
+ * dialog with injected answers; the session's own `done` wrapper clears the ref so a
+ * late bridge event is a no-op once the user answered on the terminal.
  */
 function makeSessionFactory(config: {
 	ctx: ExtensionContext;
@@ -191,21 +229,29 @@ function makeSessionFactory(config: {
 	collapseKey: string;
 	canReopenWhileHidden: boolean;
 	sessionRef: SessionRef;
+	externalResolveRef: { current: ((result: QuestionnaireResult) => void) | null };
 	Session: SessionModule["QuestionnaireSession"];
 }) {
-	const { ctx, typed, itemsByTab, collapseKey, canReopenWhileHidden, sessionRef, Session } = config;
+	const { ctx, typed, itemsByTab, collapseKey, canReopenWhileHidden, sessionRef, externalResolveRef, Session } = config;
 	return (
 		tui: TUI,
 		theme: Theme,
 		keybindings: import("./state/questionnaire-session.js").QuestionnaireSessionConfig["keybindings"],
 		done: (result: QuestionnaireResult) => void,
 	): import("./state/questionnaire-session.js").QuestionnaireSessionComponent => {
+		// Bridge hook: when the user answers in Telegram first, the bridge emits
+		// ASK_EXTERNAL_RESOLVE_EVENT and the dialog's `done` is invoked with the
+		// injected answers.
+		externalResolveRef.current = (resolved) => done(resolved);
 		const session = new Session({
 			tui,
 			theme,
 			params: typed,
 			itemsByTab,
-			done,
+			done: (resolved) => {
+				externalResolveRef.current = null;
+				done(resolved);
+			},
 			keybindings,
 			editInput: async (value) => {
 				try {
@@ -230,19 +276,6 @@ function makeSessionFactory(config: {
 		sessionRef.current = session;
 		return session.component;
 	};
-}
-
-/**
- * A TUI questionnaire ALWAYS resolves a QuestionnaireResult (cancel included), so
- * `undefined` uniquely means "host cannot render", never "user declined". RPC builds
- * that predate ctx.mode land here: run the dialog walker when the host has the
- * primitives; otherwise tell the model the user never saw the questions.
- */
-async function resolveUndefinedResult(ctx: ExtensionContext, typed: QuestionParams) {
-	if (hasDialogUI(ctx.ui)) {
-		return buildQuestionnaireResponse(await runRpcQuestionnaire(ctx.ui, typed), typed);
-	}
-	return buildToolResult(ERROR_NO_CUSTOM_UI, { answers: [], cancelled: true, error: "no_custom_ui" });
 }
 
 /**
@@ -310,7 +343,7 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 		promptGuidelines: guidance.promptGuidelines ?? DEFAULT_PROMPT_GUIDELINES,
 		parameters: QuestionParamsSchema,
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(toolCallId, params, _signal, _onUpdate, ctx) {
 			// Line-terminator normalization runs once here, ahead of validation, so
 			// every downstream consumer — validator, TUI, RPC walker, envelope, prompt
 			// event — sees the same clean text (#192).
@@ -327,86 +360,141 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 			}
 
 			// Emit event for external listeners (e.g., notification plugins)
-			emitAskUserPromptEvent(pi, typed);
+			emitAskUserPromptEvent(pi, typed, toolCallId);
 
-			// RPC hosts (VSCode pendant, ACP clients like Zed/Paseo — issue #78):
-			// ui.custom() cannot render there, but the select/input dialog
-			// sub-protocol works. Hosts that advertise ctx.mode (pi ≥0.79) route to
-			// the sequential dialog walker up front, skipping the TUI render-graph
-			// import entirely; RPC builds that predate ctx.mode are caught by the
-			// custom()-resolved-undefined backstop below. See ./rpc-fallback.ts.
-			if ((ctx as { mode?: string }).mode === "rpc" && hasDialogUI(ctx.ui)) {
-				return runRpcPath(pi, ctx.ui, typed);
-			}
+			// A per-call registry letting the Telegram bridge close this dialog
+			// when the user answers there first. The resolver is installed in the
+			// TUI factory below; a stale event for a finished call is ignored.
+			const externalResolveRef: {
+				current: ((result: QuestionnaireResult) => void) | null;
+			} = { current: null };
+			const onExternalResolve = (payload: ExternalResolvePayload) => {
+				if (payload?.toolCallId !== toolCallId) return;
+				const resolve = externalResolveRef.current;
+				externalResolveRef.current = null;
+				if (!resolve) return;
+				resolve({ answers: payload.answers ?? [], cancelled: false });
+			};
+			pi.events.on(ASK_EXTERNAL_RESOLVE_EVENT, onExternalResolve);
 
-			const itemsByTab: WrappingSelectItem[][] = typed.questions.map((q) => buildItemsForQuestion(q));
-
-			// Lazy — QuestionnaireSession pulls the ~560ms view/TUI render graph;
-			// load it only when the tool runs, not at extension registration.
-			const sessionLoad = await loadQuestionnaireSession();
-			if (!sessionLoad.ok) {
-				return buildToolResult(sessionLoad.message, { answers: [], cancelled: true, error: sessionLoad.error });
-			}
-			const { QuestionnaireSession } = sessionLoad.module;
-			// Resolve the collapse/expand key spec from config. Default is `ctrl+]`; users
-			// with non-US layouts (e.g. Latin American, where `]` is shifted) can override
-			// via the `collapseKey` config field. `resolveCollapseKey` also accepts the
-			// sentinel value `"off"` to disable the shortcut entirely.
-			const collapseKey = resolveCollapseKey(loadConfig());
-
-			// Capture the overlay handle so the session can call `setHidden()` when the
-			// user toggles collapse, and register a raw terminal input listener for the
-			// same key so the toggle still works while the overlay is hidden (pi-tui does
-			// not route input to a hidden overlay's `component.handleInput`).
-			const sessionRef: SessionRef = { current: null };
-			const overlayHandleRef: OverlayHandleRef = { current: undefined };
-			const removeOverlayInputListener = registerCollapseKeyListener(ctx, collapseKey, sessionRef, overlayHandleRef);
-			// Hiding the overlay is only reversible through the raw listener above, so
-			// the session may emit `setHidden` only when it was actually registered;
-			// otherwise collapse falls back to the visible one-line row.
-			const canReopenWhileHidden = removeOverlayInputListener !== undefined;
-
-			emitAskUserBlockedEvent(pi, true);
 			try {
-				emitTerminalAttention();
-				const result = await ctx.ui.custom<QuestionnaireResult>(
-					makeSessionFactory({
-						ctx,
-						typed,
-						itemsByTab,
-						collapseKey,
-						canReopenWhileHidden,
-						sessionRef,
-						Session: QuestionnaireSession,
-					}),
-					{
-						overlay: true,
-						overlayOptions: {
-							anchor: "bottom-center",
-							width: "100%",
-							maxHeight: "100%",
-							margin: { left: 0, right: 0, bottom: 0 },
-						},
-						onHandle: (handle) => {
-							overlayHandleRef.current = handle;
-							sessionRef.current?.setOverlayHandle(handle);
-						},
-					},
-				);
-
-				if (result === undefined) {
-					return resolveUndefinedResult(ctx, typed);
+				// RPC hosts (VSCode pendant, ACP clients like Zed/Paseo — issue #78):
+				// ui.custom() cannot render there, but the select/input dialog
+				// sub-protocol works. Hosts that advertise ctx.mode (pi ≥0.79) route to
+				// the sequential dialog walker up front, skipping the TUI render-graph
+				// import entirely; RPC builds that predate ctx.mode are caught by the
+				// custom()-resolved-undefined backstop below. See ./rpc-fallback.ts.
+				if ((ctx as { mode?: string }).mode === "rpc" && hasDialogUI(ctx.ui)) {
+					return await runRpcPath(pi, ctx.ui, typed);
 				}
 
-				return buildQuestionnaireResponse(result, typed);
+				const itemsByTab: WrappingSelectItem[][] = typed.questions.map((q) => buildItemsForQuestion(q));
+
+				// Lazy — QuestionnaireSession pulls the ~560ms view/TUI render graph;
+				// load it only when the tool runs, not at extension registration.
+				const sessionLoad = await loadQuestionnaireSession();
+				if (!sessionLoad.ok) {
+					return buildToolResult(sessionLoad.message, { answers: [], cancelled: true, error: sessionLoad.error });
+				}
+				const { QuestionnaireSession } = sessionLoad.module;
+				// Resolve the collapse/expand key spec from config. Default is `ctrl+]`; users
+				// with non-US layouts (e.g. Latin American, where `]` is shifted) can override
+				// via the `collapseKey` config field. `resolveCollapseKey` also accepts the
+				// sentinel value `"off"` to disable the shortcut entirely.
+				const collapseKey = resolveCollapseKey(loadConfig());
+
+				// Capture the overlay handle so the session can call `setHidden()` when the
+				// user toggles collapse, and register a raw terminal input listener for the
+				// same key so the toggle still works while the overlay is hidden (pi-tui does
+				// not route input to a hidden overlay's `component.handleInput`).
+				const sessionRef: SessionRef = { current: null };
+				const overlayHandleRef: OverlayHandleRef = { current: undefined };
+				const removeOverlayInputListener = registerCollapseKeyListener(ctx, collapseKey, sessionRef, overlayHandleRef);
+				// Hiding the overlay is only reversible through the raw listener above, so
+				// the session may emit `setHidden` only when it was actually registered;
+				// otherwise collapse falls back to the visible one-line row.
+				const canReopenWhileHidden = removeOverlayInputListener !== undefined;
+
+				let outcome: QuestionnaireResult | undefined;
+				emitAskUserBlockedEvent(pi, true);
+				try {
+					emitTerminalAttention();
+					const result = await ctx.ui.custom<QuestionnaireResult>(
+						makeSessionFactory({
+							ctx,
+							typed,
+							itemsByTab,
+							collapseKey,
+							canReopenWhileHidden,
+							sessionRef,
+							externalResolveRef,
+							Session: QuestionnaireSession,
+						}),
+						{
+							overlay: true,
+							overlayOptions: {
+								anchor: "bottom-center",
+								width: "100%",
+								maxHeight: "100%",
+								margin: { left: 0, right: 0, bottom: 0 },
+							},
+							onHandle: (handle) => {
+								overlayHandleRef.current = handle;
+								sessionRef.current?.setOverlayHandle(handle);
+							},
+						},
+					);
+
+					if (result === undefined) {
+						if (hasDialogUI(ctx.ui)) {
+							// custom() resolved undefined: host cannot render the TUI — fall back
+							// to the RPC dialog walker so the user still sees the questions.
+							const rpcOutcome = await runRpcQuestionnaire(ctx.ui, typed);
+							outcome = rpcOutcome;
+							return buildQuestionnaireResponse(rpcOutcome, typed);
+						}
+						outcome = { answers: [], cancelled: true, error: "no_custom_ui" };
+						return buildToolResult(ERROR_NO_CUSTOM_UI, { answers: [], cancelled: true, error: "no_custom_ui" });
+					}
+
+					outcome = result;
+					return buildQuestionnaireResponse(result, typed);
+				} finally {
+					removeOverlayInputListener?.();
+					externalResolveRef.current = null;
+					emitAskUserBlockedEvent(
+						pi,
+						false,
+						outcome && summarizeOutcome(outcome),
+						outcome ? summarizePerQuestion(outcome, typed.questions.length) : undefined,
+					);
+				}
 			} finally {
-				removeOverlayInputListener?.();
-				emitAskUserBlockedEvent(pi, false);
+				pi.events.off?.(ASK_EXTERNAL_RESOLVE_EVENT, onExternalResolve);
+				externalResolveRef.current = null;
 			}
 		},
 	});
 
 	prewarmSessionGraph();
+}
+
+/** Sequential native-dialog walker for RPC hosts; brackets it with the blocked-event pair + terminal bell. */
+async function runRpcPath(pi: ExtensionAPI, ui: DialogUI, typed: QuestionParams) {
+	emitAskUserBlockedEvent(pi, true);
+	let rpcOutcome: QuestionnaireResult | undefined;
+	try {
+		emitTerminalAttention();
+		rpcOutcome = await runRpcQuestionnaire(ui, typed);
+		return buildQuestionnaireResponse(rpcOutcome, typed);
+	} finally {
+		emitAskUserBlockedEvent(
+			pi,
+			false,
+			rpcOutcome && summarizeOutcome(rpcOutcome),
+			rpcOutcome ? summarizePerQuestion(rpcOutcome, typed.questions.length) : undefined,
+		);
+	}
 }
 
 export { buildQuestionnaireResponse, buildToolResult };

@@ -80,13 +80,13 @@ describe("QuestionSchema — option/preview/multiSelect/header shape", () => {
 		expect(Value.Check(QuestionsSchema, [makeQuestion({ header: "Architecture" })])).toBe(true);
 	});
 
-	it("rejects a single-option question (minItems=2)", () => {
+	it("accepts a single-option question (fork: minItems=1, single option = acknowledge button)", () => {
 		expect(
 			Value.Check(QuestionsSchema, [makeQuestion({ options: [{ label: "OK", description: "Only choice" }] })]),
-		).toBe(false);
+		).toBe(true);
 	});
 
-	it("rejects empty options array (minItems=2)", () => {
+	it("rejects empty options array (minItems=1)", () => {
 		expect(Value.Check(QuestionsSchema, [makeQuestion({ options: [] })])).toBe(false);
 	});
 
@@ -286,7 +286,7 @@ describe("isQuestionnaireResult — type guard", () => {
 
 describe("schema constants + RESERVED_LABELS", () => {
 	it("exports the new schema constants with expected values", () => {
-		expect(MIN_OPTIONS).toBe(2);
+		expect(MIN_OPTIONS).toBe(1); // fork: single option = acknowledge button
 		expect(MAX_OPTIONS).toBe(4);
 		expect(MAX_HEADER_LENGTH).toBe(16);
 		expect(MAX_LABEL_LENGTH).toBe(60);

@@ -46,7 +46,8 @@ describe("ask_user_question.execute — early returns", () => {
 			ctx as never,
 		);
 		expect(r?.details).toMatchObject({ cancelled: true, error: "empty_options" });
-		expect(r?.content[0]).toMatchObject({ text: expect.stringContaining("at least 2 options") });
+		// fork: MIN_OPTIONS=1 → message says "at least 1 options"
+		expect(r?.content[0]).toMatchObject({ text: expect.stringContaining("at least 1 options") });
 	});
 
 	it("returns ERROR_NO_QUESTIONS text when questions array is empty", async () => {
@@ -100,7 +101,12 @@ describe("ask_user_question.execute — terminal attention", () => {
 			expect(stdout.stdoutWrite).toHaveBeenCalledTimes(1);
 			expect(stdout.stdoutWrite).toHaveBeenCalledWith(BEL);
 			expect(mockEmit).toHaveBeenNthCalledWith(2, "rpiv:ask-user:blocked", { active: true });
-			expect(mockEmit).toHaveBeenNthCalledWith(3, "rpiv:ask-user:blocked", { active: false });
+			// fork: closing blocked event carries the outcome summary
+			expect(mockEmit).toHaveBeenNthCalledWith(3, "rpiv:ask-user:blocked", {
+				active: false,
+				summary: "отменено пользователем",
+				perQuestion: [],
+			});
 			expect(mockEmit.mock.invocationCallOrder[1]).toBeLessThan(stdout.stdoutWrite.mock.invocationCallOrder[0]);
 			expect(stdout.stdoutWrite.mock.invocationCallOrder[0]).toBeLessThan(custom.mock.invocationCallOrder[0]);
 		} finally {
@@ -170,7 +176,12 @@ describe("ask_user_question.execute — terminal attention", () => {
 			expect(result?.details).toMatchObject({ cancelled: false });
 			expect(stdout.stdoutWrite).toHaveBeenCalledWith(BEL);
 			expect(mockEmit).toHaveBeenNthCalledWith(2, "rpiv:ask-user:blocked", { active: true });
-			expect(mockEmit).toHaveBeenNthCalledWith(3, "rpiv:ask-user:blocked", { active: false });
+			// fork: closing blocked event carries the outcome summary
+			expect(mockEmit).toHaveBeenNthCalledWith(3, "rpiv:ask-user:blocked", {
+				active: false,
+				summary: "1) A",
+				perQuestion: ["A"],
+			});
 		} finally {
 			stdout.restore();
 		}
@@ -268,13 +279,16 @@ describe("ask_user_question.execute — undefined result from ctx.ui.custom (RPC
 });
 
 describe("ask_user_question.execute — new runtime guards (CC parity)", () => {
-	it("widens empty_options check to < MIN_OPTIONS (single-option rejected)", async () => {
+	it("accepts a single-option question (fork: minItems=1, single option = acknowledge button)", async () => {
 		const tool = register();
-		const ctx = ctxWithCustom(null);
-		const params = { questions: [{ question: "Q?", header: "H", options: [{ label: "A" }] }] };
+		const ctx = ctxWithCustom({ answers: [], cancelled: true });
+		const params = {
+			questions: [{ question: "Q?", header: "H", options: [{ label: "A", description: "Only choice" }] }],
+		};
 		const r = await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx as never);
-		expect(r?.details).toMatchObject({ cancelled: true, error: "empty_options" });
-		expect(r?.content[0]).toMatchObject({ text: expect.stringContaining("at least 2 options") });
+		// fork: a single-option question is valid and reaches the dialog instead of being rejected
+		expect(r?.details).not.toMatchObject({ error: "empty_options" });
+		expect(r?.details).toMatchObject({ cancelled: true });
 	});
 
 	it("returns error: duplicate_question when two questions share text", async () => {
@@ -386,6 +400,7 @@ describe("ask_user_question.execute — event emission", () => {
 		await tool.execute?.("tc", validParams() as never, undefined as never, undefined as never, ctx as never);
 
 		expect(mockEmit).toHaveBeenCalledWith("rpiv:ask-user:prompt", {
+			toolCallId: "tc", // fork: propagated for the Telegram bridge
 			questions: [
 				{
 					question: "Which library?",
@@ -400,7 +415,12 @@ describe("ask_user_question.execute — event emission", () => {
 		});
 
 		expect(mockEmit).toHaveBeenNthCalledWith(2, "rpiv:ask-user:blocked", { active: true });
-		expect(mockEmit).toHaveBeenNthCalledWith(3, "rpiv:ask-user:blocked", { active: false });
+		// fork: closing blocked event carries the outcome summary (custom resolves cancelled:false, no answers)
+		expect(mockEmit).toHaveBeenNthCalledWith(3, "rpiv:ask-user:blocked", {
+			active: false,
+			summary: "без ответа",
+			perQuestion: ["—"],
+		});
 
 		// Both start events are emitted before the dialog; the clear follows it.
 		expect(mockEmit.mock.invocationCallOrder[0]).toBeLessThan(custom.mock.invocationCallOrder[0]);
@@ -439,7 +459,8 @@ describe("ask_user_question.execute — event emission", () => {
 
 		expect(mockEmit.mock.calls.filter(([name]) => name === "rpiv:ask-user:blocked")).toEqual([
 			["rpiv:ask-user:blocked", { active: true }],
-			["rpiv:ask-user:blocked", { active: false }],
+			// fork: closing blocked event carries the outcome summary
+			["rpiv:ask-user:blocked", { active: false, summary: "отменено пользователем", perQuestion: [] }],
 			["rpiv:ask-user:blocked", { active: true }],
 			["rpiv:ask-user:blocked", { active: false }],
 		]);
@@ -500,6 +521,7 @@ describe("ask_user_question.execute — event emission", () => {
 		expect(captured.eventsEmitted.has("rpiv:ask-user:prompt")).toBe(true);
 		const payload = captured.eventsEmitted.get("rpiv:ask-user:prompt")![0] as Record<string, unknown>;
 		expect(payload).toEqual({
+			toolCallId: "tc", // fork: propagated for the Telegram bridge
 			questions: [
 				{
 					question: "Which framework?",

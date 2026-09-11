@@ -2,6 +2,6 @@
   "package": "@juicesharp/rpiv-ask-user-question",
   "upstreamRepo": "https://github.com/juicesharp/rpiv-mono",
   "upstreamPath": "packages/rpiv-ask-user-question",
-  "baselineVersion": "2.6.0",
-  "baselineCommit": "fdda6a1"
+  "baselineVersion": "2.9.0",
+  "baselineCommit": "5dcad51c670d71996fc109386a649670a690d417"
 }
