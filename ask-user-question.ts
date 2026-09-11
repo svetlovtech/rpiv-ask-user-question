@@ -47,8 +47,13 @@ function emitAskUserPromptEvent(
 	pi.events.emit(ASK_USER_PROMPT_EVENT, payload);
 }
 
-function emitAskUserBlockedEvent(pi: ExtensionAPI, active: boolean, summary?: string): void {
-	const payload: AskUserBlockedEventPayload = summary === undefined ? { active } : { active, summary };
+function emitAskUserBlockedEvent(pi: ExtensionAPI, active: boolean, summary?: string, perQuestion?: string[]): void {
+	const payload: AskUserBlockedEventPayload =
+		summary === undefined
+			? { active }
+			: perQuestion === undefined
+				? { active, summary }
+				: { active, summary, perQuestion };
 	pi.events.emit(ASK_USER_BLOCKED_EVENT, payload);
 }
 
@@ -60,6 +65,17 @@ function summarizeOutcome(result: QuestionnaireResult): string {
 		return `${a.questionIndex + 1}) ${text}`;
 	});
 	return parts.length > 0 ? parts.join("; ") : "без ответа";
+}
+
+/** Per-question answer texts ("—" when a question has no answer). */
+function summarizePerQuestion(result: QuestionnaireResult, total: number): string[] {
+	if (result.cancelled) return [];
+	const out = new Array<string>(total).fill("—");
+	for (const a of result.answers) {
+		const text = a.kind === "multi" && a.selected?.length ? a.selected.join(", ") : (a.answer ?? "—");
+		if (a.questionIndex >= 0 && a.questionIndex < total) out[a.questionIndex] = text;
+	}
+	return out;
 }
 
 /** Canonical tool name — single source of truth shared with the reconcile module. */
@@ -267,7 +283,12 @@ Preview content is rendered as markdown in a monospace box. Multi-line text with
 					rpcOutcome = await runRpcQuestionnaire(ctx.ui, typed);
 					return buildQuestionnaireResponse(rpcOutcome, typed);
 				} finally {
-					emitAskUserBlockedEvent(pi, false, rpcOutcome && summarizeOutcome(rpcOutcome));
+					emitAskUserBlockedEvent(
+						pi,
+						false,
+						rpcOutcome && summarizeOutcome(rpcOutcome),
+						rpcOutcome ? summarizePerQuestion(rpcOutcome, typed.questions.length) : undefined,
+					);
 				}
 			}
 
@@ -376,7 +397,12 @@ Preview content is rendered as markdown in a monospace box. Multi-line text with
 			} finally {
 				removeOverlayInputListener?.();
 				externalResolveRef.current = null;
-				emitAskUserBlockedEvent(pi, false, outcome && summarizeOutcome(outcome));
+				emitAskUserBlockedEvent(
+					pi,
+					false,
+					outcome && summarizeOutcome(outcome),
+					outcome ? summarizePerQuestion(outcome, typed.questions.length) : undefined,
+				);
 			}
 	}
 

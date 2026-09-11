@@ -43,6 +43,13 @@ export interface AskUserBlockedEventPayload {
 	 * Additive, optional — consumers must treat it as best-effort text.
 	 */
 	summary?: string;
+	/**
+	 * Per-question answer texts indexed by question order ("—" when a question
+	 * was left unanswered), present only when `active: false` and the outcome
+	 * is known. Additive, optional — lets consumers append each question's own
+	 * answer to its own message instead of the joined summary.
+	 */
+	perQuestion?: string[];
 }
 
 export interface AskUserPromptQuestion {

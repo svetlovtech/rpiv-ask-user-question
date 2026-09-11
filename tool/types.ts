@@ -2,7 +2,7 @@ import { type Static, Type } from "typebox";
 import { LABELS_BY_KIND, ROW_INTENT_META } from "../state/row-intent.js";
 
 export const MAX_QUESTIONS = 4;
-export const MIN_OPTIONS = 2;
+export const MIN_OPTIONS = 1;
 export const MAX_OPTIONS = 4;
 export const MAX_HEADER_LENGTH = 16;
 export const MAX_LABEL_LENGTH = 60;
@@ -67,7 +67,7 @@ export const QuestionSchema = Type.Object({
 		minItems: MIN_OPTIONS,
 		maxItems: MAX_OPTIONS,
 		description:
-			"The available choices for this question. Must have 2-4 options. Each option should be a distinct, mutually exclusive choice (unless multiSelect is enabled). The 'Type something.' row is appended automatically — do NOT author it.",
+			"The available choices for this question. 1-4 options; a single option acts as an acknowledge button. Each option should be a distinct, mutually exclusive choice (unless multiSelect is enabled). The 'Type something.' row is appended automatically — do NOT author it.",
 	}),
 	multiSelect: Type.Optional(
 		Type.Boolean({
