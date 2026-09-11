@@ -12,17 +12,20 @@
   "hint.toggle": "Space to toggle",
   "hint.notes": "n to add notes",
   "hint.tab": "Tab to switch questions",
-  "hint.collapse": "Ctrl+] to collapse",
-  "hint.expand_line": "Ctrl+] to expand · Esc to cancel",
+  "hint.collapse": "{key} to collapse",
+  "hint.expand_line": "{key} to expand · Esc to cancel",
   "hint.cancel": "Esc to cancel",
 
   "review.heading": "Review your answers",
   "review.ready": "Ready to submit your answers?",
   "review.incomplete": "⚠ Answer remaining questions before submitting:",
+  "review.global_hint": "n to add a note",
+  "review.note_label": "Note",
 
   "preview.no_preview": "No preview available",
   "preview.notes_affordance": "Notes: press n to add notes",
   "notes.header": "Notes:",
+  "notes.global_header": "Global note:",
 
   "editor.failed": "External editor failed",
 

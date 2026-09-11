@@ -1,5 +1,6 @@
 import { DynamicBorder, type Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Container, type Editor, Spacer } from "@earendil-works/pi-tui";
+import { DEFAULT_COLLAPSE_KEY, formatKeySpecForDisplay } from "../config.js";
 import type { QuestionnaireState } from "../state/state.js";
 import type { QuestionData } from "../tool/types.js";
 import type { PreviewPaneProps } from "./components/preview/preview-pane.js";
@@ -16,8 +17,21 @@ export const HINT_PART_TOGGLE = "Space to toggle";
 export const HINT_PART_NOTES = "n to add notes";
 export const HINT_PART_TAB = "Tab to switch questions";
 export const HINT_PART_CANCEL = "Esc to cancel";
-export const HINT_PART_COLLAPSE = "Ctrl+] to collapse";
-export const HINT_PART_EXPAND = "Ctrl+] to expand";
+/**
+ * Collapse/expand hint copy is templated on `KEY_PLACEHOLDER` because the
+ * shortcut is configurable (`collapseKey`) and `rpiv-i18n`'s `tr` has no
+ * interpolation — locale entries carry the same `{key}` placeholder and call
+ * sites `.replace()` it with `formatKeySpecForDisplay(collapseKey)` after
+ * lookup, so per-locale word order is preserved.
+ */
+export const KEY_PLACEHOLDER = "{key}";
+export const HINT_PART_COLLAPSE_TEMPLATE = `${KEY_PLACEHOLDER} to collapse`;
+export const HINT_PART_EXPAND_TEMPLATE = `${KEY_PLACEHOLDER} to expand`;
+/** Default-key (`Ctrl+]`) rendering of the collapse template, for tests and default-config assertions. */
+export const HINT_PART_COLLAPSE = HINT_PART_COLLAPSE_TEMPLATE.replace(
+	KEY_PLACEHOLDER,
+	formatKeySpecForDisplay(DEFAULT_COLLAPSE_KEY),
+);
 /**
  * `HINT_SINGLE` / `HINT_MULTI` are the resting core hint for NON-multiSelect
  * question tabs only: `buildHintText` drops `NOTES` while the notes editor is
@@ -33,8 +47,12 @@ export const HINT_SINGLE = [HINT_PART_ENTER, HINT_PART_NAV, HINT_PART_NOTES, HIN
 export const HINT_MULTI = [HINT_PART_ENTER, HINT_PART_NAV, HINT_PART_NOTES, HINT_PART_TAB, HINT_PART_CANCEL].join(
 	" · ",
 );
-/** Single-line footer shown by `QuestionnaireSession` when `state.collapsed === true`. Bypasses `buildHintText`. */
-export const COLLAPSED_HINT = [HINT_PART_EXPAND, HINT_PART_CANCEL].join(" · ");
+/**
+ * Template for the single-line footer shown by `QuestionnaireSession` when
+ * `state.collapsed === true`. Bypasses `buildHintText`; the session replaces
+ * `KEY_PLACEHOLDER` with the configured key's display form.
+ */
+export const COLLAPSED_HINT_TEMPLATE = [HINT_PART_EXPAND_TEMPLATE, HINT_PART_CANCEL].join(" · ");
 export const REVIEW_HEADING = "Review your answers";
 export const READY_PROMPT = "Ready to submit your answers?";
 export const INCOMPLETE_WARNING_PREFIX = "⚠ Answer remaining questions before submitting:";
@@ -42,6 +60,47 @@ export const INCOMPLETE_WARNING_PREFIX = "⚠ Answer remaining questions before 
 const OVERFLOW_UP = "↑";
 const OVERFLOW_DOWN = "↓";
 const OVERFLOW_BOTH = "↕";
+
+/** No-overflow path: append the residual spacer rows after the footer. */
+function renderFitsTerminal(natural: string[], spacerRows: number): string[] {
+	return spacerRows > 0 ? [...natural, ...Array<string>(spacerRows).fill("")] : natural;
+}
+
+/** Terminal too small for any middle content — show just chrome, hard-clamped to termRows. */
+function renderChromeOnly(natural: string[], topFixed: number, bottomFixed: number, termRows: number): string[] {
+	const chromeOnly = [...natural.slice(0, topFixed), ...natural.slice(natural.length - bottomFixed)];
+	return chromeOnly.length > termRows ? chromeOnly.slice(0, termRows) : chromeOnly;
+}
+
+/** Scroll window start, centered on the focused option; top-anchored when there is no interactive focus. */
+function computeScrollStart(
+	bodyRange: [number, number] | undefined,
+	headingCount: number,
+	availableMiddle: number,
+	middleRows: number,
+): number {
+	if (!bodyRange) return 0;
+	const focusedRowInMiddle = headingCount + bodyRange[0];
+	const focusedHeight = bodyRange[1] - bodyRange[0];
+	// Center the focused item vertically in the available middle space.
+	const idealStart = focusedRowInMiddle - Math.floor(Math.max(0, availableMiddle - focusedHeight) / 2);
+	return Math.max(0, Math.min(idealStart, middleRows - availableMiddle));
+}
+
+/** Mark the scroll window edges with overflow arrows; combined ↕ on a single-row middle. */
+function decorateOverflow(scrollableMiddle: string[], hasUp: boolean, hasDown: boolean, theme: Theme): void {
+	if (hasUp && hasDown && scrollableMiddle.length === 1) {
+		// Single-row middle: combined ↕ avoids the prior collision where ↓ overwrote ↑.
+		scrollableMiddle[0] = theme.fg("dim", OVERFLOW_BOTH);
+		return;
+	}
+	if (hasUp && scrollableMiddle.length > 0) {
+		scrollableMiddle[0] = theme.fg("dim", OVERFLOW_UP);
+	}
+	if (hasDown && scrollableMiddle.length > 0) {
+		scrollableMiddle[scrollableMiddle.length - 1] = theme.fg("dim", OVERFLOW_DOWN);
+	}
+}
 
 export type DialogState = QuestionnaireState;
 
@@ -67,6 +126,13 @@ export interface DialogConfig {
 	getCurrentBodyHeight: (width: number) => number;
 	/** Terminal height getter. Mirrors `getTerminalWidth` — reads `tui.terminal.rows` at render time. */
 	getTerminalRows: () => number;
+	/**
+	 * Resolved collapse/expand key spec (`resolveCollapseKey` output: `"ctrl+]"`,
+	 * `"alt+o"`, or `"off"`). Construction-time config, NOT canonical state —
+	 * `QuestionnaireRuntime.collapseKey` must never reach view setProps consumers.
+	 * The footer hint interpolates it, and drops the collapse part when `"off"`.
+	 */
+	collapseKey: string;
 }
 
 /**
@@ -95,12 +161,14 @@ export class DialogView implements StatefulView<DialogProps> {
 			notesInput: config.notesInput,
 			isMulti: config.isMulti,
 			getCurrentBodyHeight: config.getCurrentBodyHeight,
+			collapseKey: config.collapseKey,
 		});
 		this.submitStrategy = config.isMulti
 			? new SubmitTabStrategy({
 					theme: config.theme,
 					questions: config.questions,
 					submitPicker: config.submitPicker,
+					notesInput: config.notesInput,
 				})
 			: undefined;
 		this.maxFooterRowCount = Math.max(this.questionStrategy.footerRowCount, this.submitStrategy?.footerRowCount ?? 0);
@@ -147,48 +215,28 @@ export class DialogView implements StatefulView<DialogProps> {
 		const termRows = this.config.getTerminalRows();
 
 		if (natural.length + spacerRows <= termRows) {
-			// No overflow — add residual spacer rows after footer.
-			return spacerRows > 0 ? [...natural, ...Array<string>(spacerRows).fill("")] : natural;
+			return renderFitsTerminal(natural, spacerRows);
 		}
 
 		// OVERFLOW — apply 3-region partition with scroll-to-focus.
 		const availableMiddle = Math.max(0, termRows - topFixed - bottomFixed);
 		if (availableMiddle === 0) {
-			// Terminal too small for any middle content — show just chrome.
-			const chromeOnly = [...natural.slice(0, topFixed), ...natural.slice(natural.length - bottomFixed)];
-			return chromeOnly.length > termRows ? chromeOnly.slice(0, termRows) : chromeOnly;
+			return renderChromeOnly(natural, topFixed, bottomFixed, termRows);
 		}
 
-		const bodyRange = strategy.focusedItemRowRange(width, state);
-
-		// Compute scroll window centered on the focused option.
-		let scrollStart: number;
-		if (bodyRange) {
-			const focusedRowInMiddle = headingCount + bodyRange[0];
-			const focusedHeight = bodyRange[1] - bodyRange[0];
-			// Center the focused item vertically in the available middle space.
-			const idealStart = focusedRowInMiddle - Math.floor(Math.max(0, availableMiddle - focusedHeight) / 2);
-			scrollStart = Math.max(0, Math.min(idealStart, middleRows - availableMiddle));
-		} else {
-			// No interactive focus (submit tab) — top-anchor the middle.
-			scrollStart = 0;
-		}
-
+		const scrollStart = computeScrollStart(
+			strategy.focusedItemRowRange(width, state),
+			headingCount,
+			availableMiddle,
+			middleRows,
+		);
 		const scrollableMiddle = natural.slice(topFixed + scrollStart, topFixed + scrollStart + availableMiddle);
-
-		const hasUp = scrollStart > 0;
-		const hasDown = scrollStart + availableMiddle < middleRows;
-		if (hasUp && hasDown && scrollableMiddle.length === 1) {
-			// Single-row middle: combined ↕ avoids the prior collision where ↓ overwrote ↑.
-			scrollableMiddle[0] = this.config.theme.fg("dim", OVERFLOW_BOTH);
-		} else {
-			if (hasUp && scrollableMiddle.length > 0) {
-				scrollableMiddle[0] = this.config.theme.fg("dim", OVERFLOW_UP);
-			}
-			if (hasDown && scrollableMiddle.length > 0) {
-				scrollableMiddle[scrollableMiddle.length - 1] = this.config.theme.fg("dim", OVERFLOW_DOWN);
-			}
-		}
+		decorateOverflow(
+			scrollableMiddle,
+			scrollStart > 0,
+			scrollStart + availableMiddle < middleRows,
+			this.config.theme,
+		);
 
 		const result = [
 			...natural.slice(0, topFixed),

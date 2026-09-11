@@ -1,5 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, Container, type Editor, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { COLLAPSE_KEY_OFF, formatKeySpecForDisplay } from "../config.js";
 import { t } from "../state/i18n-bridge.js";
 import { formatAnswerScalar } from "../tool/format-answer.js";
 import type { QuestionData } from "../tool/types.js";
@@ -8,7 +9,7 @@ import {
 	type DialogState,
 	HINT_PART_CANCEL,
 	HINT_PART_CLEAR,
-	HINT_PART_COLLAPSE,
+	HINT_PART_COLLAPSE_TEMPLATE,
 	HINT_PART_ENTER,
 	HINT_PART_NAV,
 	HINT_PART_NEW_LINE,
@@ -16,6 +17,7 @@ import {
 	HINT_PART_TAB,
 	HINT_PART_TOGGLE,
 	INCOMPLETE_WARNING_PREFIX,
+	KEY_PLACEHOLDER,
 	READY_PROMPT,
 	REVIEW_HEADING,
 } from "./dialog-builder.js";
@@ -23,6 +25,9 @@ import type { StatefulView } from "./stateful-view.js";
 import type { TabComponents } from "./tab-components.js";
 
 const NOTES_HEADER = "Notes:";
+const GLOBAL_NOTES_HEADER = "Global note:";
+const REVIEW_GLOBAL_HINT = "n to add a note";
+const REVIEW_NOTE_LABEL = "Note";
 
 /**
  * Single-row, width-clipped chrome cell. The footer row count is invariant
@@ -86,6 +91,8 @@ export interface QuestionTabStrategyConfig {
 	notesInput: Editor;
 	isMulti: boolean;
 	getCurrentBodyHeight: (width: number) => number;
+	/** Resolved collapse key spec (`"ctrl+]"`, `"alt+o"`, or `"off"`). Drives the footer's collapse hint. */
+	collapseKey: string;
 }
 
 export class QuestionTabStrategy implements TabContentStrategy {
@@ -137,7 +144,10 @@ export class QuestionTabStrategy implements TabContentStrategy {
 		// drops the trailing parts (collapse hint first, then cancel) with `…`.
 		return [
 			new Spacer(1),
-			new OneLineClippedText(this.config.theme.fg("dim", buildHintText(question, this.config.isMulti, state)), 1),
+			new OneLineClippedText(
+				this.config.theme.fg("dim", buildHintText(question, this.config.isMulti, state, this.config.collapseKey)),
+				1,
+			),
 		];
 	}
 
@@ -153,10 +163,12 @@ export interface SubmitTabStrategyConfig {
 	theme: Theme;
 	questions: readonly QuestionData[];
 	submitPicker: Component | undefined;
+	/** Shared notes Editor — mounted into midRows while the global-note editor is open on this tab. */
+	notesInput: Editor;
 }
 
 export class SubmitTabStrategy implements TabContentStrategy {
-	/** Spacer(1) + Text(prompt, 1) + Spacer(1) + submitPicker(2) = 5 rendered rows. Fallback path lands at 5 via 2 trailing Spacer(1)s. */
+	/** Spacer(1) + Text(prompt, 1) + submitPicker(2) + OneLineClippedText(hint, 1) = 5 rendered rows. Fallback path lands at 5 via 2 Spacer(1)s in the picker slot. */
 	readonly footerRowCount = 5;
 
 	constructor(private readonly config: SubmitTabStrategyConfig) {}
@@ -184,6 +196,18 @@ export class SubmitTabStrategy implements TabContentStrategy {
 				c.addChild(new Text(this.config.theme.fg("dim", `     notes: ${a.notes}`), 1, 0));
 			}
 		}
+		// Committed global note (#182) as a review entry — pressing `n` gets visible
+		// feedback and the note is reviewable before submit. Same presence predicate as
+		// the reducer's doneFor lift. Hidden while the editor is open: the midRows editor
+		// (seeded with this text) is the live surface then, and a stale copy above it
+		// would read as a second note.
+		const globalNote = state.notesByTab.get(this.config.questions.length);
+		if (!state.notesVisible && globalNote && globalNote.length > 0) {
+			c.addChild(new Text(this.config.theme.fg("muted", ` ● ${t("review.note_label", REVIEW_NOTE_LABEL)}`), 1, 0));
+			c.addChild(
+				new Text(`   ${this.config.theme.fg("muted", "→")} ${this.config.theme.fg("text", globalNote)}`, 1, 0),
+			);
+		}
 		return c;
 	}
 
@@ -191,8 +215,17 @@ export class SubmitTabStrategy implements TabContentStrategy {
 		return this.bodyComponent(state).render(width).length;
 	}
 
-	midRows(_state: DialogState): Component[] {
-		return [];
+	midRows(state: DialogState): Component[] {
+		// notesVisible-gated mirror of QuestionTabStrategy.midRows: while the global-note
+		// editor is open, the shared notesInput mounts below the answer summary under its
+		// own header. The pseudo-index draft (notesByTab[questions.length]) is reducer-owned
+		// state; the strategy only renders.
+		if (!state.notesVisible) return [];
+		return [
+			new Text(this.config.theme.fg("muted", t("notes.global_header", GLOBAL_NOTES_HEADER)), 1, 0),
+			this.config.notesInput,
+			new Spacer(1),
+		];
 	}
 
 	footerRows(state: DialogState): Component[] {
@@ -210,7 +243,7 @@ export class SubmitTabStrategy implements TabContentStrategy {
 						"warning",
 						`${t("review.incomplete", INCOMPLETE_WARNING_PREFIX)} ${missing.join(", ")}`,
 					);
-		const out: Component[] = [new Spacer(1), new Text(promptText, 1, 0), new Spacer(1)];
+		const out: Component[] = [new Spacer(1), new Text(promptText, 1, 0)];
 		if (this.config.submitPicker) {
 			out.push(this.config.submitPicker);
 		} else {
@@ -218,6 +251,12 @@ export class SubmitTabStrategy implements TabContentStrategy {
 			out.push(new Spacer(1));
 			out.push(new Spacer(1));
 		}
+		// Bottom key-hint row, mirroring QuestionTabStrategy's footer idiom (one dim
+		// `·`-joined line below everything) — the prompt reads straight into its picker
+		// with no hint wedged between them. Always present so footerRowCount stays
+		// exactly 5. OneLineClippedText (not pi-tui Text) — a wrapped hint would inflate
+		// the footer past footerRowCount and desync the chrome's cross-tab height math.
+		out.push(new OneLineClippedText(this.config.theme.fg("dim", buildSubmitHintText(state)), 1));
 		return out;
 	}
 
@@ -228,22 +267,50 @@ export class SubmitTabStrategy implements TabContentStrategy {
 
 /**
  * Build the controls hint line. Order:
- *   Enter · ↑/↓ [· Space toggle] [· n notes] [· Tab switch] · Esc · Ctrl+] collapse
+ *   Enter · ↑/↓ [· Space toggle] [· n notes] [· Tab switch] · Esc [· <key> collapse]
  *   [· Shift+Enter newline] [· Ctrl+U clear]
  *
  * `NOTES` is part of the resting (notes-closed) core — it drops while the notes
  * editor or custom-answer input has the keyboard. Ctrl+G is Pi's global external-
  * editor shortcut and needs no local hint; the context-specific clear shortcut is
  * appended at the far right while input mode is active.
+ *
+ * The collapse part interpolates the configured `collapseKey` (display-cased)
+ * and is omitted entirely when the shortcut is `"off"` — `routeKey` and the raw
+ * terminal listener both refuse to collapse in that case, so advertising a key
+ * would be a lie.
  */
-export function buildHintText(question: QuestionData | undefined, isMulti: boolean, state: DialogState): string {
+export function buildHintText(
+	question: QuestionData | undefined,
+	isMulti: boolean,
+	state: DialogState,
+	collapseKey: string,
+): string {
 	const parts: string[] = [t("hint.enter", HINT_PART_ENTER), t("hint.navigate", HINT_PART_NAV)];
 	if (question?.multiSelect === true) parts.push(t("hint.toggle", HINT_PART_TOGGLE));
 	if (question && !state.notesVisible && !state.inputMode) parts.push(t("hint.notes", HINT_PART_NOTES));
 	if (isMulti) parts.push(t("hint.tab", HINT_PART_TAB));
 	parts.push(t("hint.cancel", HINT_PART_CANCEL));
-	parts.push(t("hint.collapse", HINT_PART_COLLAPSE));
+	if (collapseKey !== COLLAPSE_KEY_OFF) {
+		parts.push(
+			t("hint.collapse", HINT_PART_COLLAPSE_TEMPLATE).replace(KEY_PLACEHOLDER, formatKeySpecForDisplay(collapseKey)),
+		);
+	}
 	if (state.notesVisible || state.inputMode) parts.push(t("hint.newline", HINT_PART_NEW_LINE));
 	if (state.inputMode) parts.push(t("hint.clear", HINT_PART_CLEAR));
+	return parts.join(" · ");
+}
+
+/**
+ * Submit-tab counterpart of `buildHintText` — the same `·`-joined bottom-row idiom.
+ * Resting: Enter · ↑/↓ · `n to add a note` · Esc. While the global-note editor is
+ * open the note part drops (the editor is the affordance then) and the Shift+Enter
+ * newline hint is appended after cancel, mirroring the question tabs' notes-open shape.
+ */
+export function buildSubmitHintText(state: DialogState): string {
+	const parts: string[] = [t("hint.enter", HINT_PART_ENTER), t("hint.navigate", HINT_PART_NAV)];
+	if (!state.notesVisible) parts.push(t("review.global_hint", REVIEW_GLOBAL_HINT));
+	parts.push(t("hint.cancel", HINT_PART_CANCEL));
+	if (state.notesVisible) parts.push(t("hint.newline", HINT_PART_NEW_LINE));
 	return parts.join(" · ");
 }
