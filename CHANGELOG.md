@@ -7,7 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The terminal-side `rpiv:ask-user:blocked` event (`active: false`) now carries `selections` — per-question arrays of 1-based chosen option indices (matching the chat-server `selections` convention used by permission cards, `[Allow(1), Deny(2)]`). Empty array marks a custom-text or unanswered question. Consumers can now mark the chosen option lines in an external mirror of the questions instead of appending only the text trail (used by `pi-telegram-bridge` to show green checkmarks in Telegram).
+
 ### Fixed
+
+- A collapsed (hidden) questionnaire no longer leaves the TUI feeling dead until an external (Telegram) answer resolves the dialog: while hidden, the collapse binding keeps working (including consuming its Kitty repeat/release events), and `Esc` now reopens the dialog. Every other key still passes through untouched.
+- Temporary dialog-lifecycle trace at `/tmp/pi-ask-ui.log` (open/toggle/reopen/done/editor) to diagnose “frozen TUI” reports; remove once stable.
 
 - Bare carriage returns in model-supplied text (`question`, `header`, `options[].label`, `options[].description`, `options[].preview`) no longer fragment option rows or corrupt the terminal line: line terminators are normalized once at tool entry — `\r\n` becomes `\n`, a lone `\r` is deleted (never a space, never a newline) — before validation, the TUI, the RPC dialog walker, the answer envelope, and the `rpiv:ask-user:prompt` payload see the text (#192). As a consequence, labels that differed from a reserved or duplicate label only by a stray `\r` are now rejected as before the CR slipped in.
 

@@ -48,6 +48,16 @@ export interface AskUserBlockedEventPayload {
 	 * answer to its own message instead of the joined summary.
 	 */
 	perQuestion?: string[];
+	/**
+	 * Per-question selected option indices (1-based, matching the chat-server
+	 * `selections` convention used by permission cards: `[Allow(1), Deny(2)]`),
+	 * indexed by question order. An empty array marks a question answered with
+	 * custom text or left unanswered. Present only when `active: false` and the
+	 * outcome is known. Additive, optional — lets consumers mark the chosen
+	 * option lines (e.g. ✅) in an external mirror of the questions instead of
+	 * appending only the text trail.
+	 */
+	selections?: number[][];
 }
 
 export interface AskUserPromptQuestion {

@@ -181,6 +181,34 @@ describe("ask_user_question — raw terminal collapse listener", () => {
 		await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx);
 	});
 
+	it("reopens a hidden questionnaire on Esc (dead-TUI rescue)", async () => {
+		// While hidden, pi-tui routes no input to the overlay — the TUI looks
+		// frozen until an external answer arrives. Esc must reopen it.
+		const tool = register();
+		const handle = makeHandle();
+		const { ctx, listenerRef } = driveWithListener(handle, (done) => {
+			expect(listenerRef.current?.(CTRL_RBRACKET)).toEqual({ consume: true });
+			expect(handle.isHidden()).toBe(true);
+			expect(listenerRef.current?.("\x1b")).toEqual({ consume: true });
+			expect(handle.isHidden()).toBe(false);
+			done({ answers: [], cancelled: true });
+		});
+		await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx);
+	});
+
+	it("passes other keys through while hidden (only Esc rescues)", async () => {
+		const tool = register();
+		const handle = makeHandle();
+		const { ctx, listenerRef } = driveWithListener(handle, (done) => {
+			expect(listenerRef.current?.(CTRL_RBRACKET)).toEqual({ consume: true });
+			expect(handle.isHidden()).toBe(true);
+			expect(listenerRef.current?.("x")).toBeUndefined();
+			expect(handle.isHidden()).toBe(true);
+			done({ answers: [], cancelled: true });
+		});
+		await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx);
+	});
+
 	it("leaves the key to another focused overlay (visible but unfocused questionnaire)", async () => {
 		const tool = register();
 		// e.g. `/btw` opened on top: the questionnaire is visible underneath but

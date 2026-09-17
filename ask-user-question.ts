@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { appendFileSync } from "node:fs";
 import { isKeyRelease, isKeyRepeat, matchesKey, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 import {
 	COLLAPSE_KEY_OFF,
@@ -34,6 +35,19 @@ import {
 import { validateQuestionnaire } from "./tool/validate-questionnaire.js";
 import type { WrappingSelectItem } from "./view/components/wrapping-select.js";
 
+/**
+ * Temporary trace of the TUI dialog lifecycle (open/hide/reopen/done/editor),
+ * mirroring the bridge's /tmp/pi-tg-bridge.log tracer. Used to diagnose
+ * "TUI frozen until the Telegram answer" reports — remove once stable.
+ */
+function traceUi(msg: string): void {
+	try {
+		appendFileSync("/tmp/pi-ask-ui.log", `${new Date().toISOString()} ${msg}\n`);
+	} catch {
+		/* ignore */
+	}
+}
+
 function emitAskUserPromptEvent(pi: ExtensionAPI, params: QuestionParams, toolCallId: string): void {
 	const payload: AskUserPromptEventPayload = {
 		toolCallId,
@@ -51,13 +65,21 @@ function emitAskUserPromptEvent(pi: ExtensionAPI, params: QuestionParams, toolCa
 	pi.events.emit(ASK_USER_PROMPT_EVENT, payload);
 }
 
-function emitAskUserBlockedEvent(pi: ExtensionAPI, active: boolean, summary?: string, perQuestion?: string[]): void {
+function emitAskUserBlockedEvent(
+	pi: ExtensionAPI,
+	active: boolean,
+	summary?: string,
+	perQuestion?: string[],
+	selections?: number[][],
+): void {
 	const payload: AskUserBlockedEventPayload =
 		summary === undefined
 			? { active }
 			: perQuestion === undefined
 				? { active, summary }
-				: { active, summary, perQuestion };
+				: selections === undefined
+					? { active, summary, perQuestion }
+					: { active, summary, perQuestion, selections };
 	pi.events.emit(ASK_USER_BLOCKED_EVENT, payload);
 }
 
@@ -78,6 +100,32 @@ function summarizePerQuestion(result: QuestionnaireResult, total: number): strin
 	for (const a of result.answers) {
 		const text = a.kind === "multi" && a.selected?.length ? a.selected.join(", ") : (a.answer ?? "—");
 		if (a.questionIndex >= 0 && a.questionIndex < total) out[a.questionIndex] = text;
+	}
+	return out;
+}
+
+/**
+ * Per-question selected option indices (1-based, matching the chat-server
+ * `selections` convention used by permission cards: `[Allow(1), Deny(2)]`),
+ * so an external mirror (pi-telegram-bridge → Telegram) can mark the chosen
+ * option lines with a checkmark instead of appending only the text trail.
+ * Empty array = custom-text answer, unanswered, or cancelled question.
+ */
+function summarizeSelections(result: QuestionnaireResult, typed: QuestionParams): number[][] {
+	const out: number[][] = typed.questions.map(() => []);
+	if (result.cancelled) return out;
+	for (const a of result.answers) {
+		if (a.questionIndex < 0 || a.questionIndex >= typed.questions.length) continue;
+		const options = typed.questions[a.questionIndex].options;
+		const indexOf = (label: string | null | undefined) =>
+			label ? options.findIndex((o) => o.label === label) + 1 : 0;
+		if (a.kind === "option") {
+			const idx = indexOf(a.answer);
+			if (idx > 0) out[a.questionIndex] = [idx];
+		} else if (a.kind === "multi" && a.selected?.length) {
+			const idxs = a.selected.map(indexOf).filter((i) => i > 0);
+			if (idxs.length > 0) out[a.questionIndex] = idxs;
+		}
 	}
 	return out;
 }
@@ -198,11 +246,30 @@ function registerCollapseKeyListener(
 		// top (e.g. `/btw`), leave the keystroke to that overlay instead of
 		// toggling the questionnaire from underneath it.
 		if (!handle.isHidden() && !handle.isFocused()) return undefined;
+		if (handle.isHidden()) {
+			// Hidden overlay: pi-tui routes no input to it, so from the user's
+			// point of view the TUI is dead until an external (Telegram) answer
+			// resolves the dialog. The collapse binding keeps working (toggle/
+			// consume repeat+release), and Esc — the universal "get me back" key
+			// — reopens too. Every other key still passes through untouched.
+			if (matchesKey(data, collapseKey as Parameters<typeof matchesKey>[1])) {
+				if (isKeyRelease(data) || isKeyRepeat(data)) return { consume: true };
+				traceUi(`toggle via ${collapseKey} -> visible`);
+				sessionRef.current?.toggleCollapsedExternal();
+				return { consume: true };
+			}
+			if (!matchesKey(data, "escape" as Parameters<typeof matchesKey>[1])) return undefined;
+			if (isKeyRelease(data) || isKeyRepeat(data)) return { consume: true };
+			traceUi("reopen via Esc while hidden");
+			sessionRef.current?.toggleCollapsedExternal();
+			return { consume: true };
+		}
 		if (!matchesKey(data, collapseKey as Parameters<typeof matchesKey>[1])) return undefined;
 		// Kitty-protocol terminals report press, repeat, and release separately.
 		// Toggle only on the initial press so a tap does not immediately reopen
 		// the overlay and a held key does not toggle it repeatedly.
 		if (isKeyRelease(data) || isKeyRepeat(data)) return { consume: true };
+		traceUi(`toggle via ${collapseKey} -> hidden`);
 		sessionRef.current?.toggleCollapsedExternal();
 		if (handle.isHidden() && !hasAnnouncedHide) {
 			hasAnnouncedHide = true;
@@ -349,6 +416,7 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 			// event — sees the same clean text (#192).
 			const typed = normalizeQuestionParams(params as unknown as QuestionParams);
 			if (!ctx.hasUI) return rejectWithoutUi();
+			traceUi(`open toolCallId=${toolCallId} questions=${typed.questions.length} mode=${(ctx as { mode?: string }).mode ?? "tui"}`);
 
 			const validation = validateQuestionnaire(typed);
 			if (!validation.ok) {
@@ -446,6 +514,7 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 					);
 
 					if (result === undefined) {
+						traceUi(`custom resolved undefined toolCallId=${toolCallId}`);
 						if (hasDialogUI(ctx.ui)) {
 							// custom() resolved undefined: host cannot render the TUI — fall back
 							// to the RPC dialog walker so the user still sees the questions.
@@ -458,6 +527,7 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 					}
 
 					outcome = result;
+					traceUi(`done toolCallId=${toolCallId} cancelled=${result.cancelled} answers=${result.answers.length} selections=${JSON.stringify(summarizeSelections(result, typed))}`);
 					return buildQuestionnaireResponse(result, typed);
 				} finally {
 					removeOverlayInputListener?.();
@@ -467,6 +537,7 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 						false,
 						outcome && summarizeOutcome(outcome),
 						outcome ? summarizePerQuestion(outcome, typed.questions.length) : undefined,
+						outcome ? summarizeSelections(outcome, typed) : undefined,
 					);
 				}
 			} finally {
@@ -493,6 +564,7 @@ async function runRpcPath(pi: ExtensionAPI, ui: DialogUI, typed: QuestionParams)
 			false,
 			rpcOutcome && summarizeOutcome(rpcOutcome),
 			rpcOutcome ? summarizePerQuestion(rpcOutcome, typed.questions.length) : undefined,
+			rpcOutcome ? summarizeSelections(rpcOutcome, typed) : undefined,
 		);
 	}
 }
